@@ -6,6 +6,10 @@ from bleak import BleakScanner, BleakClient
 from bleak.backends._manufacturers import MANUFACTURERS
 
 
+def print_hex(data: bytes):
+    print("".join(format(b, "02x") for b in data))
+
+
 async def scan():
     devices = await BleakScanner.discover()
     devs_by_mf = defaultdict(list)
@@ -37,6 +41,7 @@ class HubPropertyOp(enum.IntEnum):
 
 class HubProperty(enum.IntEnum):
     AdvertisingName = 0x01
+    FWVersion = 0x03
 
 
 class MessageType:
@@ -124,6 +129,7 @@ class LegoMario:
         self.address = address
         self._client = None
         self.advertising_name = AsyncProp()
+        self.fw_version = AsyncProp()
 
     def _notify_callback(self, sender, data):
         print(f"Got notification: ({sender}, {data})")
@@ -141,6 +147,7 @@ class LegoMario:
             await self._client.connect()
             await self._client.start_notify(CHARACTERISTIC_UUID, self._notify_callback)
             await self._get_advertising_name()
+            await self._get_fw_version()
         return self
 
     async def __aexit__(self, et, ev, tb):
@@ -149,6 +156,14 @@ class LegoMario:
             await self._client.disconnect()
         self._client = None
 
+    @staticmethod
+    def decode_version_string(data):
+        major = (data[-1] & 0xF0) >> 4
+        minor = data[-1] & 0x0F
+        bugfix = data[-2]
+        # TODO: do the other bits as well
+        return f"{major}.{minor}.{bugfix}"
+
     async def send_message(self, message):
         pload = message.serialize()
         await self._client
@@ -156,27 +171,36 @@ class LegoMario:
     def _apply_hub_property(self, msg_t: HubProperties):
         if msg_t.prop == HubProperty.AdvertisingName:
             self._apply_advertising_name(msg_t.data)
+        elif msg_t.prop == HubProperty.FWVersion:
+            self._apply_fw_version(msg_t.data)
 
     async def _get_advertising_name(self):
         msg_t = HubProperties(HubPropertyOp.RequestUpdate, HubProperty.AdvertisingName)
         msg = Message(msg_t)
-        print(f"Advertising name message: {msg.serialize()}")
-        res = await self._client.write_gatt_char(
-            CHARACTERISTIC_UUID, msg.serialize(), response=True
-        )
-        return res
+        res = await self._client.write_gatt_char(CHARACTERISTIC_UUID, msg.serialize())
+
+    async def _get_fw_version(self):
+        msg_t = HubProperties(HubPropertyOp.RequestUpdate, HubProperty.FWVersion)
+        msg = Message(msg_t)
+        res = await self._client.write_gatt_char(CHARACTERISTIC_UUID, msg.serialize())
 
     def _apply_advertising_name(self, data):
         self.advertising_name.set(data.decode())
 
+    def _apply_fw_version(self, data):
+        version = self.decode_version_string(data)
+        self.fw_version.set(version)
 
-async def get_name():
+
+async def get_data():
     mario = LegoMario(MARIO_UUID)
     async with mario as mario:
-        name = await mario.advertising_name.get()
-        print(f"Name: {name}")
+        name, fw_version = await asyncio.gather(
+            mario.advertising_name.get(), mario.fw_version.get()
+        )
+        print(f"Name: {name}; Fw ver: {fw_version}")
 
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(get_name())
+    loop.run_until_complete(get_data())
