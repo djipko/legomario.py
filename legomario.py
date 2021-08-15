@@ -44,6 +44,12 @@ class HubProperty(enum.IntEnum):
     FWVersion = 0x03
 
 
+class ActionTypes(enum.IntEnum):
+    SwitchOff = 0x01
+    ActivateBusy = 0x05
+    ResetBusy = 0x06
+
+
 class MessageType:
     pass
 
@@ -66,8 +72,22 @@ class HubProperties(MessageType):
         return cls(HubPropertyOp(op), HubProperty(prop), bytes(data) or None)
 
 
+class HubActions(MessageType):
+    TYPE = 0x02
+
+    def __init__(self, action_type: ActionTypes):
+        self.action_type = action_type
+
+    def serialize(self) -> bytes:
+        return bytes([self.action_type])
+
+    @classmethod
+    def deserialize(cls, payload) -> "HubProperties":
+        return cls(ActionTypes(payload[0]))
+
+
 class Message:
-    TYPE_MAP = {0x01: HubProperties}
+    TYPE_MAP = {0x01: HubProperties, 0x02: HubActions}
 
     def __init__(self, msg_type):
         self.msg_type = msg_type
@@ -164,9 +184,9 @@ class LegoMario:
         # TODO: do the other bits as well
         return f"{major}.{minor}.{bugfix}"
 
-    async def send_message(self, message):
+    async def send_message(self, message: Message) -> None:
         pload = message.serialize()
-        await self._client
+        await self._client.write_gatt_char(CHARACTERISTIC_UUID, pload)
 
     def _apply_hub_property(self, msg_t: HubProperties):
         if msg_t.prop == HubProperty.AdvertisingName:
@@ -177,12 +197,12 @@ class LegoMario:
     async def _get_advertising_name(self):
         msg_t = HubProperties(HubPropertyOp.RequestUpdate, HubProperty.AdvertisingName)
         msg = Message(msg_t)
-        res = await self._client.write_gatt_char(CHARACTERISTIC_UUID, msg.serialize())
+        await self.send_message(msg)
 
     async def _get_fw_version(self):
         msg_t = HubProperties(HubPropertyOp.RequestUpdate, HubProperty.FWVersion)
         msg = Message(msg_t)
-        res = await self._client.write_gatt_char(CHARACTERISTIC_UUID, msg.serialize())
+        await self.send_message(msg)
 
     def _apply_advertising_name(self, data):
         self.advertising_name.set(data.decode())
@@ -191,16 +211,29 @@ class LegoMario:
         version = self.decode_version_string(data)
         self.fw_version.set(version)
 
+    async def make_busy(self):
+        msg_t = HubActions(ActionTypes.ActivateBusy)
+        msg = Message(msg_t)
+        await self.send_message(msg)
 
-async def get_data():
+    async def switch_off(self):
+        msg_t = HubActions(ActionTypes.SwitchOff)
+        msg = Message(msg_t)
+        await self.send_message(msg)
+
+
+async def run():
     mario = LegoMario(MARIO_UUID)
     async with mario as mario:
         name, fw_version = await asyncio.gather(
             mario.advertising_name.get(), mario.fw_version.get()
         )
         print(f"Name: {name}; Fw ver: {fw_version}")
+        await mario.make_busy()
+        await mario.switch_off()
+        await asyncio.sleep(5)
 
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(get_data())
+    loop.run_until_complete(run())
