@@ -35,6 +35,7 @@ MARIO_UUID = "4201C3E6-A39D-42E4-A3D3-DAB08D7AD327"
 
 
 class HubPropertyOp(enum.IntEnum):
+    Set = 0x01
     RequestUpdate = 0x05
     Update = 0x06
 
@@ -42,6 +43,7 @@ class HubPropertyOp(enum.IntEnum):
 class HubProperty(enum.IntEnum):
     AdvertisingName = 0x01
     FWVersion = 0x03
+    Volume = 0x12
 
 
 class ActionTypes(enum.IntEnum):
@@ -75,6 +77,8 @@ class HubProperties(MessageType):
 
     def serialize(self) -> bytes:
         msg = bytes([self.prop, self.op])
+        if self.data:
+            msg += self.data
         return msg
 
     @classmethod
@@ -176,6 +180,7 @@ class LegoMario:
         self._client = None
         self.advertising_name = AsyncProp()
         self.fw_version = AsyncProp()
+        self.volume = AsyncProp()
 
     def _notify_callback(self, sender, data):
         print(f"Got notification: ({sender}, {data})")
@@ -196,6 +201,7 @@ class LegoMario:
             await self._client.start_notify(CHARACTERISTIC_UUID, self._notify_callback)
             await self._get_advertising_name()
             await self._get_fw_version()
+            await self._get_volume()
         return self
 
     async def __aexit__(self, et, ev, tb):
@@ -221,6 +227,8 @@ class LegoMario:
             self._apply_advertising_name(msg_t.data)
         elif msg_t.prop == HubProperty.FWVersion:
             self._apply_fw_version(msg_t.data)
+        elif msg_t.prop == HubProperty.Volume:
+            self._apply_volume(msg_t.data)
 
     async def _get_advertising_name(self):
         msg_t = HubProperties(HubPropertyOp.RequestUpdate, HubProperty.AdvertisingName)
@@ -229,6 +237,11 @@ class LegoMario:
 
     async def _get_fw_version(self):
         msg_t = HubProperties(HubPropertyOp.RequestUpdate, HubProperty.FWVersion)
+        msg = Message(msg_t)
+        await self.send_message(msg)
+
+    async def _get_volume(self):
+        msg_t = HubProperties(HubPropertyOp.RequestUpdate, HubProperty.Volume)
         msg = Message(msg_t)
         await self.send_message(msg)
 
@@ -244,6 +257,10 @@ class LegoMario:
         version = self.decode_version_string(data)
         self.fw_version.set(version)
 
+    def _apply_volume(self, data):
+        volume = int.from_bytes(data, byteorder="little")
+        self.volume.set(volume)
+
     async def make_busy(self):
         msg_t = HubActions(ActionTypes.ActivateBusy)
         msg = Message(msg_t)
@@ -254,17 +271,27 @@ class LegoMario:
         msg = Message(msg_t)
         await self.send_message(msg)
 
+    async def set_volume(self, volume):
+        ranged = min(max(volume, 0), 100)
+        msg_t = HubProperties(HubPropertyOp.Set, HubProperty.Volume, bytes([ranged]))
+        msg = Message(msg_t)
+        await self.send_message(msg)
+        await self._get_volume()
+
 
 async def run():
     mario = LegoMario(MARIO_UUID)
     async with mario as mario:
-        name, fw_version = await asyncio.gather(
-            mario.advertising_name.get(), mario.fw_version.get()
+        name, fw_version, volume = await asyncio.gather(
+            mario.advertising_name.get(), mario.fw_version.get(), mario.volume.get()
         )
-        print(f"Name: {name}; Fw ver: {fw_version}")
-        await mario.make_busy()
+        print(f"Name: {name}; Fw ver: {fw_version}; Volume: {volume}")
+        # await mario.make_busy()
         # await mario.switch_off()
+        await mario.set_volume(100)
         await asyncio.sleep(5)
+        print(f"New vol: {await mario.volume.get()}")
+        #await mario.set_volume(100)
 
 
 if __name__ == "__main__":
