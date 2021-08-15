@@ -50,6 +50,17 @@ class ActionTypes(enum.IntEnum):
     ResetBusy = 0x06
 
 
+class ErrorCodes(enum.IntEnum):
+    ACK = 0x01
+    MACK = 0x02
+    BufferOverflow = 0x03
+    Timeout = 0x04
+    CommandNoRecognised = 0x05
+    InvalidUse = 0x06
+    Overcurrent = 0x07
+    InternalError = 0x08
+
+
 class MessageType:
     pass
 
@@ -86,8 +97,23 @@ class HubActions(MessageType):
         return cls(ActionTypes(payload[0]))
 
 
+class ErrorMessages(MessageType):
+    TYPE = 0x05
+
+    def __init__(self, command_type: int, error_code: ErrorCodes):
+        self.command_type = command_type
+        self.error_code = error_code
+
+    def serialize(self) -> bytes:
+        return bytes([self.command_type, self.error_code])
+
+    @classmethod
+    def deserialize(cls, payload) -> "ErrorMessages":
+        return cls(payload[0], ErrorCodes(payload[1]))
+
+
 class Message:
-    TYPE_MAP = {0x01: HubProperties, 0x02: HubActions}
+    TYPE_MAP = {0x01: HubProperties, 0x02: HubActions, 0x05: ErrorMessages}
 
     def __init__(self, msg_type):
         self.msg_type = msg_type
@@ -160,6 +186,8 @@ class LegoMario:
             return
         if isinstance(msg.msg_type, HubProperties):
             self._apply_hub_property(msg.msg_type)
+        if isinstance(msg.msg_type, ErrorMessages):
+            self._report_error(msg.msg_type)
 
     async def __aenter__(self):
         if not self._client:
@@ -207,6 +235,11 @@ class LegoMario:
     def _apply_advertising_name(self, data):
         self.advertising_name.set(data.decode())
 
+    def _report_error(self, error_msg_t: ErrorMessages):
+        print(
+            f"Got error for command 0x{error_msg_t.command_type:02x}: {repr(error_msg_t.error_code)}"
+        )
+
     def _apply_fw_version(self, data):
         version = self.decode_version_string(data)
         self.fw_version.set(version)
@@ -230,7 +263,7 @@ async def run():
         )
         print(f"Name: {name}; Fw ver: {fw_version}")
         await mario.make_busy()
-        await mario.switch_off()
+        # await mario.switch_off()
         await asyncio.sleep(5)
 
 
