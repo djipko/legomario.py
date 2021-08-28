@@ -34,6 +34,10 @@ CHARACTERISTIC_HANDLE = 17
 MARIO_UUID = "4201C3E6-A39D-42E4-A3D3-DAB08D7AD327"
 
 
+class MarioPorts(enum.IntEnum):
+    PANTS = 0x02
+
+
 class HubPropertyOp(enum.IntEnum):
     Set = 0x01
     RequestUpdate = 0x05
@@ -116,8 +120,42 @@ class ErrorMessages(MessageType):
         return cls(payload[0], ErrorCodes(payload[1]))
 
 
+class PortInputFormatSetup(MessageType):
+    TYPE = 0x41
+
+    def __init__(self, port: MarioPorts, mode: int, notification: bool = False):
+        self.port = port
+        self.mode = mode
+        self.notification = notification
+
+    def serialize(self) -> bytes:
+        return (
+            bytes([self.port, self.mode])
+            + (1).to_bytes(4, "little")
+            + bytes([1 if self.notification else 0])
+        )
+
+
+class PortValue(MessageType):
+    TYPE = 0x45
+
+    def __init__(self, port: MarioPorts, value: bytes):
+        self.port = port
+        self.value = value
+
+    @classmethod
+    def deserialize(cls, payload: bytes) -> "PortValue":
+        return cls(payload[0], payload[1:])
+
+
 class Message:
-    TYPE_MAP = {0x01: HubProperties, 0x02: HubActions, 0x05: ErrorMessages}
+    TYPE_MAP = {
+        0x01: HubProperties,
+        0x02: HubActions,
+        0x05: ErrorMessages,
+        0x41: PortInputFormatSetup,
+        0x45: PortValue,
+    }
 
     def __init__(self, msg_type):
         self.msg_type = msg_type
@@ -183,14 +221,15 @@ class LegoMario:
         self.volume = AsyncProp()
 
     def _notify_callback(self, sender, data):
-        print(f"Got notification: ({sender}, {data})")
         try:
             msg = Message.deserialize(data)
         except ValueError:
-            print("Unsupported message type")
+            print(f"Unsupported message type: ({sender}, {data})")
             return
         if isinstance(msg.msg_type, HubProperties):
             self._apply_hub_property(msg.msg_type)
+        if isinstance(msg.msg_type, PortValue):
+            self._apply_port_value(msg.msg_type)
         if isinstance(msg.msg_type, ErrorMessages):
             self._report_error(msg.msg_type)
 
@@ -199,6 +238,7 @@ class LegoMario:
             self._client = BleakClient(self.address)
             await self._client.connect()
             await self._client.start_notify(CHARACTERISTIC_UUID, self._notify_callback)
+            await self._activate_port(MarioPorts.PANTS, 0)
             await self._get_advertising_name()
             await self._get_fw_version()
             await self._get_volume()
@@ -229,6 +269,20 @@ class LegoMario:
             self._apply_fw_version(msg_t.data)
         elif msg_t.prop == HubProperty.Volume:
             self._apply_volume(msg_t.data)
+
+    def _apply_port_value(self, msg_t: PortValue):
+        try:
+            port = MarioPorts(msg_t.port)
+        except ValueError:
+            print(f"Got value {msg_t.value} for unregistered port {msg_t.port}")
+            return
+        # TODO: Implement port value logic and port registration
+        print(f"Got value {msg_t.value} for port {port}")
+
+    async def _activate_port(self, port: MarioPorts, mode: int):
+        msg_t = PortInputFormatSetup(port, mode, True)
+        msg = Message(msg_t)
+        await self.send_message(msg)
 
     async def _get_advertising_name(self):
         msg_t = HubProperties(HubPropertyOp.RequestUpdate, HubProperty.AdvertisingName)
@@ -288,10 +342,10 @@ async def run():
         print(f"Name: {name}; Fw ver: {fw_version}; Volume: {volume}")
         # await mario.make_busy()
         # await mario.switch_off()
-        await mario.set_volume(100)
-        await asyncio.sleep(5)
+        await mario.set_volume(50)
         print(f"New vol: {await mario.volume.get()}")
-        #await mario.set_volume(100)
+        await asyncio.sleep(10)
+        # await mario.set_volume(100)
 
 
 if __name__ == "__main__":
