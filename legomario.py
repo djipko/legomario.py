@@ -1,7 +1,12 @@
+import abc
 import asyncio
+import dataclasses
 import sys
+from typing import Type, Generic, TypeVar, AsyncGenerator
 import enum
 from collections import defaultdict
+
+import aiostream
 from bleak import BleakScanner, BleakClient
 from bleak.backends._manufacturers import MANUFACTURERS
 
@@ -27,10 +32,10 @@ async def scan():
 # These are Lego BLE wireless protocol specific
 SERVICE_UUID = "00001623-1212-efde-1623-785feabcd123"
 CHARACTERISTIC_UUID = "00001624-1212-efde-1623-785feabcd123"
-# TODO: Discover this instead of
+# TODO: Discover this instead of hardcoding maybe
 CHARACTERISTIC_HANDLE = 17
 
-# Move this to an arg
+# TODO: Move this to an arg
 MARIO_UUID = "4201C3E6-A39D-42E4-A3D3-DAB08D7AD327"
 
 
@@ -212,6 +217,101 @@ class AsyncProp:
         return self.value
 
 
+T = TypeVar("T")
+
+
+class PortData(Generic[T], metaclass=abc.ABCMeta):
+    def __init__(self, raw_value: bytes):
+        self.raw_value = raw_value
+
+    @abc.abstractmethod
+    def get_value(self) -> T:
+        pass
+
+
+class RawPortData(PortData[bytes]):
+    def get_value(self) -> bytes:
+        return self.raw_value
+
+
+class NoData(PortData[None]):
+    def get_value(self) -> bytes:
+        return None
+
+
+@dataclasses.dataclass
+class PortReading:
+    port: MarioPorts
+    reading: PortData
+
+
+class MarioPort:
+    def __init__(self, port: MarioPorts, data_cls: Type[PortData]):
+        self.port = port
+        self.data_cls = data_cls
+        self.value = NoData(b"")
+        self._updates = asyncio.Queue()
+        self._done = asyncio.Event()
+        self.waiter = asyncio.create_task(self._done.wait())
+
+    def update_raw(self, value: bytes):
+        self._updates.put_nowait(self.data_cls(value))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> PortReading:
+        done, pending = await asyncio.wait(
+            (self.waiter, self._updates.get()), return_when=asyncio.FIRST_COMPLETED
+        )
+        if self.waiter in done:
+            raise StopAsyncIteration
+        for t in done:
+            self.value = t.result()
+        return PortReading(self.port, self.value)
+
+    def close(self):
+        self._done.set()
+
+
+class PortRegistry:
+    def __init__(self):
+        self.ports = {}
+        self.waiters = {}
+        self.running = False
+
+    def add_port(self, port: MarioPorts):
+        if self.running:
+            raise RuntimeError("Can't add ports to a running registry")
+        if port in self.ports:
+            return
+        # TODO: Hook in a registry of more port data types such as pants etc
+        self.ports[port] = MarioPort(port, RawPortData)
+
+    def port_value_update_raw(self, port: MarioPorts, value: bytes):
+        port = self.ports.get(port)
+        if not port:
+            return
+        port.update_raw(value)
+
+    async def read_all_ports(self) -> AsyncGenerator:
+        """Reads all the ports asynchronously until they're closed"""
+        self.running = True
+        async for reading in aiostream.stream.merge(*(p for p in self.ports.values())):
+            yield reading
+
+    def close(self):
+        for p in self.ports.values():
+            p.close()
+        self.ports = {}
+
+    def __repr__(self):
+        port_data = ",".join(
+            f"({repr(port)} => {p.value.get_value()})" for port, p in self.ports.items()
+        )
+        return f"<Ports: [{port_data}]>"
+
+
 class LegoMario:
     def __init__(self, address):
         self.address = address
@@ -219,6 +319,7 @@ class LegoMario:
         self.advertising_name = AsyncProp()
         self.fw_version = AsyncProp()
         self.volume = AsyncProp()
+        self.ports = None
 
     def _notify_callback(self, sender, data):
         try:
@@ -237,18 +338,31 @@ class LegoMario:
         if not self._client:
             self._client = BleakClient(self.address)
             await self._client.connect()
+            await self._init_ports()
             await self._client.start_notify(CHARACTERISTIC_UUID, self._notify_callback)
-            await self._activate_port(MarioPorts.PANTS, 0)
             await self._get_advertising_name()
             await self._get_fw_version()
             await self._get_volume()
         return self
 
     async def __aexit__(self, et, ev, tb):
+        if self.ports:
+            self.ports.close()
+            self.ports = None
         if self._client:
             await self._client.stop_notify(CHARACTERISTIC_UUID)
             await self._client.disconnect()
         self._client = None
+
+    async def _init_ports(self):
+        self.ports = PortRegistry()
+        for port in MarioPorts.__members__.values():
+            await self._activate_port(port, 0)
+            self.ports.add_port(port)
+
+    async def read_ports_changed(self):
+        async for port_data in self.ports.read_all_ports():
+            yield port_data.port
 
     @staticmethod
     def decode_version_string(data):
@@ -277,7 +391,7 @@ class LegoMario:
             print(f"Got value {msg_t.value} for unregistered port {msg_t.port}")
             return
         # TODO: Implement port value logic and port registration
-        print(f"Got value {msg_t.value} for port {port}")
+        self.ports.port_value_update_raw(port, msg_t.value)
 
     async def _activate_port(self, port: MarioPorts, mode: int):
         msg_t = PortInputFormatSetup(port, mode, True)
@@ -332,20 +446,27 @@ class LegoMario:
         await self.send_message(msg)
         await self._get_volume()
 
+    async def repr(self):
+        name, fw_version, volume = await asyncio.gather(
+            self.advertising_name.get(), self.fw_version.get(), self.volume.get()
+        )
+        return (
+            f"<Mario name: {name}; fw ver: {fw_version}; volume: {volume} "
+            f"{self.ports}>"
+        )
+
 
 async def run():
     mario = LegoMario(MARIO_UUID)
     async with mario as mario:
-        name, fw_version, volume = await asyncio.gather(
-            mario.advertising_name.get(), mario.fw_version.get(), mario.volume.get()
-        )
-        print(f"Name: {name}; Fw ver: {fw_version}; Volume: {volume}")
+        print(f"{await mario.repr()}")
         # await mario.make_busy()
         # await mario.switch_off()
         await mario.set_volume(50)
         print(f"New vol: {await mario.volume.get()}")
-        await asyncio.sleep(10)
-        # await mario.set_volume(100)
+
+        async for _ in mario.read_ports_changed():
+            print(f"{await mario.repr()}")
 
 
 if __name__ == "__main__":
