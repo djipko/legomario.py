@@ -239,6 +239,36 @@ class NoData(PortData[None]):
         return None
 
 
+class MarioPants(enum.IntEnum):
+    NONE = 0x00
+    PROPELLER = 0x0A
+    TANOOKI = 0x0C
+    CAT = 0x11
+    FIRE = 0x12
+    PENGUIN = 0x14
+    NORMAL = 0x21
+    BUILDER = 0x22
+
+
+class PantsData(PortData[MarioPants]):
+    def get_value(self) -> MarioPorts:
+        try:
+            return MarioPants(int.from_bytes(self.raw_value, "little"))
+        except ValueError:
+            print(f"Unknown pants value: {self.raw_value}")
+            return MarioPants.NONE
+
+
+@dataclasses.dataclass
+class MarioPortInfo:
+    port: MarioPorts
+    mode: int
+    data_cls: Type[PortData]
+
+
+MARIO_PORTS = [MarioPortInfo(MarioPorts.PANTS, 0, PantsData)]
+
+
 @dataclasses.dataclass
 class PortReading:
     port: MarioPorts
@@ -280,13 +310,12 @@ class PortRegistry:
         self.waiters = {}
         self.running = False
 
-    def add_port(self, port: MarioPorts):
+    def add_port(self, port: MarioPorts, data_cls: Type[PortData]):
         if self.running:
             raise RuntimeError("Can't add ports to a running registry")
         if port in self.ports:
             return
-        # TODO: Hook in a registry of more port data types such as pants etc
-        self.ports[port] = MarioPort(port, RawPortData)
+        self.ports[port] = MarioPort(port, data_cls)
 
     def port_value_update_raw(self, port: MarioPorts, value: bytes):
         port = self.ports.get(port)
@@ -304,10 +333,12 @@ class PortRegistry:
         for p in self.ports.values():
             p.close()
         self.ports = {}
+        self.running = False
 
     def __repr__(self):
         port_data = ",".join(
-            f"({repr(port)} => {p.value.get_value()})" for port, p in self.ports.items()
+            f"({repr(port)} => {repr(p.value.get_value())})"
+            for port, p in self.ports.items()
         )
         return f"<Ports: [{port_data}]>"
 
@@ -356,9 +387,9 @@ class LegoMario:
 
     async def _init_ports(self):
         self.ports = PortRegistry()
-        for port in MarioPorts.__members__.values():
-            await self._activate_port(port, 0)
-            self.ports.add_port(port)
+        for port_info in MARIO_PORTS:
+            await self._activate_port(port_info.port, port_info.mode)
+            self.ports.add_port(port_info.port, port_info.data_cls)
 
     async def read_ports_changed(self):
         async for port_data in self.ports.read_all_ports():
