@@ -200,11 +200,9 @@ class AsyncProp:
     def __init__(self):
         self.value = None
         self.ev = asyncio.Event()
-        self.is_set = False
 
     def set(self, val):
         self.value = val
-        self.is_set = True
         self.ev.set()
 
     async def get(self):
@@ -212,7 +210,7 @@ class AsyncProp:
         return self.value
 
     def get_nowait(self):
-        if not self.is_set:
+        if not self.ev.is_set():
             raise AsyncPropNotSet("Property not set yet")
         return self.value
 
