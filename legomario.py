@@ -12,7 +12,7 @@ from bleak.backends._manufacturers import MANUFACTURERS
 
 
 def hex(data: bytes):
-    return "".join(format(b, "02x") for b in data)
+    return "0x" + "".join(format(b, "02x") for b in data)
 
 
 async def scan():
@@ -40,6 +40,7 @@ MARIO_UUID = "4201C3E6-A39D-42E4-A3D3-DAB08D7AD327"
 
 
 class MarioPorts(enum.IntEnum):
+    GESTURE = 0x00
     READER = 0x01
     PANTS = 0x02
 
@@ -313,6 +314,29 @@ class SensorData(PortData[SensorReading]):
         return SensorReading(barcode, color)
 
 
+class MarioGesture(enum.IntEnum):
+    NONE = 0x0000
+    BUMP = 0x0001
+    SHAKE = 0x0010
+    TURNING = 0x0100
+    FASTMOVE = 0x0200
+    TRANSLATION = 0x0400
+    HIGHFALLCRASH = 0x0800
+    DIRECTIONCHANGE = 0x1000
+    REVERSE = 0x2000
+    JUMP = 0x8000
+
+
+class GestureData(PortData[MarioGesture]):
+    def get_value(self) -> MarioGesture:
+        gesture = self.raw_value[:2]
+        try:
+            return MarioGesture(int.from_bytes(gesture, "little"))
+        except ValueError:
+            print(f"Unknown gesture value: {hex(gesture)}")
+            return MarioGesture.NONE
+
+
 @dataclasses.dataclass
 class MarioPortInfo:
     port: MarioPorts
@@ -321,6 +345,7 @@ class MarioPortInfo:
 
 
 MARIO_PORTS = [
+    MarioPortInfo(MarioPorts.GESTURE, 1, GestureData),
     MarioPortInfo(MarioPorts.READER, 0, SensorData),
     MarioPortInfo(MarioPorts.PANTS, 0, PantsData),
 ]
