@@ -11,8 +11,8 @@ from bleak import BleakScanner, BleakClient
 from bleak.backends._manufacturers import MANUFACTURERS
 
 
-def print_hex(data: bytes):
-    print("".join(format(b, "02x") for b in data))
+def hex(data: bytes):
+    return "".join(format(b, "02x") for b in data)
 
 
 async def scan():
@@ -40,6 +40,7 @@ MARIO_UUID = "4201C3E6-A39D-42E4-A3D3-DAB08D7AD327"
 
 
 class MarioPorts(enum.IntEnum):
+    READER = 0x01
     PANTS = 0x02
 
 
@@ -253,8 +254,63 @@ class PantsData(PortData[MarioPants]):
         try:
             return MarioPants(int.from_bytes(self.raw_value, "little"))
         except ValueError:
-            print(f"Unknown pants value: {self.raw_value}")
+            print(f"Unknown pants value: {hex(self.raw_value)}")
             return MarioPants.NONE
+
+
+class MarioBarcode(enum.IntEnum):
+    NONE = 0xFFFF
+    GOOMBA = 0x0200
+    REFRESH = 0x1400
+    QUESTION = 0x2900
+    CLOUD = 0x2E00
+    BAT = 0x7900
+    STAR = 0x7B00
+    KINGBOO = 0x8800
+    BOWSERJR = 0x9900
+    BOWSERGOAL = 0xB700
+    START = 0xB800
+    SHYGUY = 0x0300
+    MUSHROOM = 0x6300
+    CHEEPCHEEP = 0x8900
+
+
+class MarioColor(enum.IntEnum):
+    NONE = 0xFFFF
+    WHITE = 0x1300
+    RED = 0x1500
+    BLUE = 0x1700
+    YELLOW = 0x1800
+    BLACK = 0x1A00
+    GREEN = 0x2500
+    BROWN = 0x6A00
+    PURPLE = 0x0C01
+    UNKNOWN = 0x3801
+    CYAN = 0x4201
+
+
+@dataclasses.dataclass
+class SensorReading:
+    barcode: MarioBarcode
+    color: MarioColor
+
+
+class SensorData(PortData[SensorReading]):
+    def get_value(self) -> SensorReading:
+        barcode_bytes, color_bytes = self.raw_value[:2], self.raw_value[2:]
+        try:
+            barcode = MarioBarcode(int.from_bytes(barcode_bytes, "big"))
+        except ValueError:
+            print(f"Unknown barcode value: {hex(barcode_bytes)}")
+            barcode = MarioBarcode.NONE
+
+        try:
+            color = MarioColor(int.from_bytes(color_bytes, "big"))
+        except ValueError:
+            print(f"Unknown color value: {hex(color_bytes)}")
+            barcode = MarioColor.NONE
+
+        return SensorReading(barcode, color)
 
 
 @dataclasses.dataclass
@@ -264,7 +320,10 @@ class MarioPortInfo:
     data_cls: Type[PortData]
 
 
-MARIO_PORTS = [MarioPortInfo(MarioPorts.PANTS, 0, PantsData)]
+MARIO_PORTS = [
+    MarioPortInfo(MarioPorts.READER, 0, SensorData),
+    MarioPortInfo(MarioPorts.PANTS, 0, PantsData),
+]
 
 
 @dataclasses.dataclass
@@ -351,6 +410,7 @@ class LegoMario:
         self.ports = None
 
     def _notify_callback(self, sender, data):
+        # print(f"Received {data} from {sender})")
         try:
             msg = Message.deserialize(data)
         except ValueError:
